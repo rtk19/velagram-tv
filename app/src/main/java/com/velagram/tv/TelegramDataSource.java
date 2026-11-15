@@ -13,6 +13,7 @@ public final class TelegramDataSource extends BaseDataSource {
   int id;
   long offset, end;
   volatile boolean closed;
+  boolean leased;
 
   public TelegramDataSource(Telegram t) {
     super(true);
@@ -26,6 +27,8 @@ public final class TelegramDataSource extends BaseDataSource {
     id = Integer.parseInt(uri.getHost());
     offset = spec.position;
     closed = false;
+    TemporaryMedia.acquire(); leased = true;
+    TemporaryMedia.touch(tg, id);
     try {
       TdApi.File f = tg.file(id);
       end = spec.length == C.LENGTH_UNSET ? f.size : Math.min(f.size, offset + spec.length);
@@ -33,6 +36,7 @@ public final class TelegramDataSource extends BaseDataSource {
       transferStarted(spec);
       return end > 0 ? end - offset : C.LENGTH_UNSET;
     } catch (Exception e) {
+      if (leased) { leased = false; TemporaryMedia.release(); }
       throw new IOException("Telegram stream could not open", e);
     }
   }
@@ -92,6 +96,7 @@ public final class TelegramDataSource extends BaseDataSource {
   @Override
   public void close() {
     closed = true;
+    if (leased) { leased = false; TemporaryMedia.release(); }
     if (uri != null) {
       uri = null;
       transferEnded();

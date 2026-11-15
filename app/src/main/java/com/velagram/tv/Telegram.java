@@ -95,6 +95,7 @@ public final class Telegram {
       announce("Signed out");
     } else if (s instanceof TdApi.AuthorizationStateReady) {
       announce("Connected");
+      TemporaryMedia.trim(this, false, message -> {});
       client.send(new TdApi.LoadChats(new TdApi.ChatListMain(), 100), x -> {});
     } else if (s instanceof TdApi.AuthorizationStateWaitOtherDeviceConfirmation) {
       qr = ((TdApi.AuthorizationStateWaitOtherDeviceConfirmation) s).link;
@@ -452,9 +453,12 @@ public final class Telegram {
 
   public void download(JSONObject item, Consumer<String> done) {
     int id = item.optInt("file");
+    store.put("temporary.keep." + id, "true");
+    TemporaryMedia.acquire();
     client.send(
         new TdApi.DownloadFile(id, 16, 0, 0, true),
         o -> {
+          TemporaryMedia.release();
           if (o instanceof TdApi.File && ((TdApi.File) o).local.isDownloadingCompleted) {
             try {
               JSONObject saved = new JSONObject(item.toString());

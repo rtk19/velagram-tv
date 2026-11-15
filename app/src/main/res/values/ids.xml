@@ -1,0 +1,6 @@
+<resources>
+    <item name="presentation_refresh" type="id" />
+    <item name="presentation_mode" type="id" />
+    <item name="hero_update" type="id" />
+    <item name="focus_stop" type="id" />
+</resources>

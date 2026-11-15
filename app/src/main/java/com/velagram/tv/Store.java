@@ -203,7 +203,7 @@ public final class Store {
     String title = PlaybackPrefs.titleKey(media);
     prefs.edit().remove("speed." + title).remove("source." + title)
         .remove("subtitleVisible." + title).remove("subtitleTrack." + key)
-        .remove("zoom." + title).apply();
+        .remove("zoom." + title).remove("trackIntent.text." + title).remove("trackIntent.audio." + title).apply();
   }
 
   public synchronized void progress(String key, long position, long duration, JSONObject item) {

@@ -15,12 +15,14 @@ import org.junit.*;
 public class PlayerParityTest {
   Instrumentation instrumentation;
   Store store;
+  PreferenceSnapshot snapshot;
   String previous;
   File movie;
   Activity activity;
   @Before public void setup() throws Exception {
     instrumentation = InstrumentationRegistry.getInstrumentation();
     Context target = instrumentation.getTargetContext(); store = new Store(target);
+    snapshot = new PreferenceSnapshot(store);
     previous = store.profile(); store.put("profile", "Player parity " + UUID.randomUUID());
     movie = new File(target.getFilesDir(), "parity-playback.mp4");
     try (InputStream in = instrumentation.getContext().getAssets().open("playback.mp4"); FileOutputStream out = new FileOutputStream(movie)) {
@@ -29,11 +31,15 @@ public class PlayerParityTest {
   }
   @After public void cleanup() {
     if (activity != null) instrumentation.runOnMainSync(() -> activity.finish());
+    long deadline = android.os.SystemClock.elapsedRealtime() + 10000;
+    while (activity != null && !activity.isDestroyed() && android.os.SystemClock.elapsedRealtime() < deadline)
+      try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
     instrumentation.waitForIdleSync();
     String prefix = "profile." + store.profile() + ".";
     android.content.SharedPreferences.Editor editor = store.prefs.edit();
     for (String key : store.prefs.getAll().keySet()) if (key.startsWith(prefix)) editor.remove(key);
-    editor.apply(); store.put("profile", previous);
+    editor.apply(); snapshot.restore();
+    if (movie != null) movie.delete();
   }
   @Test public void media3SkipActionsSeekActualPlayback() throws Exception { verify(PlayerActivity.class, "media3"); }
   @Test public void vlcSkipActionsSeekActualPlayback() throws Exception { verify(VlcActivity.class, "vlc"); }

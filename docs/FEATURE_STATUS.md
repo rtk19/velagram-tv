@@ -1,3 +1,5 @@
+> Historical implementation snapshot. Current work and physical GOTV evidence are documented in [PREMIUM_VISUAL_REVIEW.md](PREMIUM_VISUAL_REVIEW.md) and [IOS_TV_PARITY.md](IOS_TV_PARITY.md).
+
 # Android TV feature status — 1.1.0
 
 The TV interface and primary catalog/player workflow were rebuilt after reviewing the current iOS source. The UI is adapted to a remote and a landscape TV. This document separates implementation from validation; it does not certify universal format support or complete iOS equivalence.

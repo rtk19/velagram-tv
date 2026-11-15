@@ -1,3 +1,5 @@
+> Historical implementation snapshot. Current work and physical GOTV evidence are documented in [PREMIUM_VISUAL_REVIEW.md](PREMIUM_VISUAL_REVIEW.md) and [IOS_TV_PARITY.md](IOS_TV_PARITY.md).
+
 # Velagram TV 1.1 — visual and functional review
 
 This build replaces the first port's large boxed menus and stock playback toolbar. It uses cinematic artwork, a compact navigation rail, clean poster rows and shared controls across Media3 and VLC.

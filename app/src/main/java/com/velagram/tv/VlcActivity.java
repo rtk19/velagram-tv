@@ -12,11 +12,12 @@ import org.videolan.libvlc.*;
 import org.videolan.libvlc.util.VLCVideoLayout;
 
 @androidx.media3.common.util.UnstableApi
-public class VlcActivity extends Activity {
+public class VlcActivity extends androidx.activity.ComponentActivity {
   LibVLC lib;
   MediaPlayer player;
   VLCVideoLayout video;
   Store store;
+  boolean temporaryLease;
   JSONObject media;
   String key;
   Uri currentSubtitle;
@@ -46,12 +47,15 @@ public class VlcActivity extends Activity {
     preloader = new NextPreloader(this, store);
     try {
       media = new JSONObject(getIntent().getStringExtra("media"));
+      if (media.optString("url").startsWith("td:")) { TemporaryMedia.acquire(); temporaryLease = true; }
       key = media.optString("progressKey", media.optString("id", media.optString("url")));
       FrameLayout root = new FrameLayout(this);
       root.setBackgroundColor(0xff000000);
       video = new VLCVideoLayout(this);
       root.addView(video, new FrameLayout.LayoutParams(-1, -1));
       LinkedHashMap<String, Runnable> actions = new LinkedHashMap<>();
+      if (media.optJSONObject("catalog") != null) actions.put("Sources", this::otherSources);
+      if (Store.episode(media)) actions.put("Episodes", () -> PlayerPanels.episodes(this, store, media, this::persist));
       actions.put("Speed", this::speed);
       actions.put("Audio", () -> tracks(false));
       actions.put("Subtitles", this::subtitles);
@@ -64,6 +68,19 @@ public class VlcActivity extends Activity {
               PlaybackPrefs.context(media),
               "VLC",
               new CinemaControls.Playback() {
+                public float speed() { return player == null ? 1f : player.getRate(); }
+                public String track(boolean subtitles) {
+                  if (player == null) return "";
+                  if (subtitles && !PlaybackPrefs.subtitles(store, media)) return "Off";
+                  int current = subtitles ? player.getSpuTrack() : player.getAudioTrack();
+                  MediaPlayer.TrackDescription[] tracks = subtitles ? player.getSpuTracks() : player.getAudioTracks();
+                  if (tracks != null) for (MediaPlayer.TrackDescription track : tracks) if (track.id == current) {
+                    String language = TrackMemory.language("", track.name);
+                    return language.isBlank() ? track.name : Locale.forLanguageTag(language).getDisplayLanguage();
+                  }
+                  return "";
+                }
+
                 public boolean playing() {
                   return player != null && player.isPlaying();
                 }
@@ -145,6 +162,7 @@ public class VlcActivity extends Activity {
               runOnUiThread(() -> {
                 controls.status("");
                 applyPicture();
+                restoreTrackChoices();
                 if (!loadedProviderSubtitle && PlaybackPrefs.subtitles(store, media)) {
                   loadedProviderSubtitle = true;
                   List<JSONObject> tracks = Models.list(media.optJSONArray("subtitles"));
@@ -186,13 +204,31 @@ public class VlcActivity extends Activity {
         "Playback speed",
         "Remembered for this title.",
         Arrays.stream(values).map(v -> v + "×").toArray(String[]::new),
-        -1,
+        Arrays.asList(values).indexOf(Float.toString(player.getRate())),
         i -> {
           player.setRate(Float.parseFloat(values[i]));
           store.put("speed." + PlaybackPrefs.titleKey(media), values[i]);
           controls.status(values[i] + "× playback speed");
           controls.show();
         });
+  }
+
+  void restoreTrackChoices() {
+    for (boolean subtitles : new boolean[] {false, true}) {
+      if (subtitles && !PlaybackPrefs.subtitles(store, media)) continue;
+      JSONObject intent = TrackMemory.read(store, media, subtitles);
+      MediaPlayer.TrackDescription[] tracks = subtitles ? player.getSpuTracks() : player.getAudioTracks();
+      if (tracks == null || intent == null) continue;
+      int best = -1; MediaPlayer.TrackDescription selected = null;
+      for (MediaPlayer.TrackDescription track : tracks) {
+        int score = TrackMemory.score(intent, "", track.name, 0);
+        if (score > best) { best = score; selected = track; }
+      }
+      if (selected != null) {
+        if (subtitles && player.getSpuTrack() != selected.id) player.setSpuTrack(selected.id);
+        if (!subtitles && player.getAudioTrack() != selected.id) player.setAudioTrack(selected.id);
+      }
+    }
   }
 
   void tracks(boolean subs) {
@@ -207,13 +243,17 @@ public class VlcActivity extends Activity {
           i -> {});
       return;
     }
+    int currentTrack = subs ? player.getSpuTrack() : player.getAudioTrack();
+    int selectedTrack = 0;
+    for (int index = 0; index < tracks.length; index++) if (tracks[index].id == currentTrack) selectedTrack = index;
     TvUi.sheet(
         this,
         subs ? "Subtitle tracks" : "Audio tracks",
         "",
         Arrays.stream(tracks).map(t -> t.name).toArray(String[]::new),
-        -1,
+        selectedTrack,
         i -> {
+          if (tracks[i].id >= 0) TrackMemory.save(store, media, subs, "", tracks[i].name, 0);
           if (subs) { player.setSpuTrack(tracks[i].id); PlaybackPrefs.subtitles(store, media, tracks[i].id >= 0); }
           else player.setAudioTrack(tracks[i].id);
         });
@@ -348,40 +388,19 @@ public class VlcActivity extends Activity {
   }
 
   void options() {
-    TvUi.sheet(
-        this,
-        "Playback options",
-        "",
-        new String[] {
-          "Fit picture",
-          "Fill screen",
-          "Audio timing",
-          "Next episode",
-          "Choose another source",
-          "Use standard player"
-        },
-        -1,
-        i -> {
-          if (i == 0 || i == 1) { store.put("zoom." + PlaybackPrefs.titleKey(media), i == 0 ? "0" : "4"); applyPicture(); }
-          if (i == 2)
-            TvUi.sheet(
-                this,
-                "Audio timing",
-                "",
-                new String[] {"Earlier by 0.1 seconds", "Reset", "Later by 0.1 seconds"},
-                -1,
-                j ->
-                    player.setAudioDelay(
-                        j == 1 ? 0 : player.getAudioDelay() + (j == 0 ? -100000 : 100000)));
-          if (i == 3) nextEpisode();
-          if (i == 4) otherSources();
-          if (i == 5) {
-            persist();
-            startActivity(
-                new Intent(this, PlayerActivity.class).putExtra("media", media.toString()));
-            finish();
-          }
-        });
+    LinkedHashMap<String, Runnable> options = new LinkedHashMap<>();
+    options.put("Fit picture", () -> { store.put("zoom." + PlaybackPrefs.titleKey(media), "0"); applyPicture(); });
+    options.put("Fill screen", () -> { store.put("zoom." + PlaybackPrefs.titleKey(media), "4"); applyPicture(); });
+    options.put("Audio timing", () -> TvUi.sheet(this, "Audio timing", "", new String[] {"Earlier by 0.1 seconds", "Reset", "Later by 0.1 seconds"}, -1,
+        index -> player.setAudioDelay(index == 1 ? 0 : player.getAudioDelay() + (index == 0 ? -100000 : 100000))));
+    if (Store.episode(media)) options.put("Next episode", this::nextEpisode);
+    if (media.optJSONObject("catalog") != null) options.put("Choose another source", this::otherSources);
+    options.put("Use standard player", () -> {
+      persist(); startActivity(new Intent(this, PlayerActivity.class).putExtra("media", media.toString())); finish();
+    });
+    options.put("Sleep timer", controls::sleepTimer); options.put("Lock controls", controls::lockControls);
+    TvUi.sheet(this, "Playback options", "", options.keySet().toArray(new String[0]), -1,
+        index -> new ArrayList<>(options.values()).get(index).run());
   }
 
   void applyPicture() {
@@ -472,6 +491,10 @@ public class VlcActivity extends Activity {
     }
   }
 
+  // Intercept remote keys before focusable children, as the Activity contract requires.
+  // The public androidx.activity superclass inherits this method from a restricted core shim:
+  // https://android.googlesource.com/platform/frameworks/support/+/f2e05c341382db64d127118a13451dcaa554b702/core/core/src/main/java/androidx/core/app/ComponentActivity.java
+  @android.annotation.SuppressLint("RestrictedApi")
   @Override
   public boolean dispatchKeyEvent(KeyEvent e) {
     if (controls != null && controls.key(e)) return true;
@@ -510,6 +533,7 @@ public class VlcActivity extends Activity {
     if (lib != null) lib.release();
     if (relay != null) relay.close();
     if (headerRelay != null) headerRelay.close();
+    if (temporaryLease) { TemporaryMedia.release(); temporaryLease = false; }
     super.onDestroy();
   }
 }

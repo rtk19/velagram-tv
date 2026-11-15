@@ -17,7 +17,7 @@ import org.drinkless.tdlib.TdApi;
 import org.json.*;
 
 @androidx.media3.common.util.UnstableApi
-public class MainActivity extends Activity {
+public class MainActivity extends androidx.activity.ComponentActivity {
   static final int BG = 0xff0b0d12,
       SURFACE = 0xff191d27,
       INK = 0xfff4f6fb,
@@ -30,7 +30,9 @@ public class MainActivity extends Activity {
   ScrollView scroll;
   String current = "Home";
   final Deque<Runnable> back = new ArrayDeque<>();
-  int generation = 0;
+  int generation = 0, nextGeneration = 0;
+  final Set<Integer> retainedGenerations = new HashSet<>();
+  final Map<Integer, List<Runnable>> pendingScreens = new HashMap<>();
   Telegram tg;
   JSONObject selected;
   String pendingFile = "";
@@ -44,6 +46,8 @@ public class MainActivity extends Activity {
   boolean qrRequested = false;
   Runnable currentRoute;
   boolean refreshOnReturn;
+  boolean initialFocusPending = true;
+  View lastContentFocus;
   final Map<String, JSONObject> episodeMetadata = new HashMap<>();
 
   interface Task<T> {
@@ -63,7 +67,7 @@ public class MainActivity extends Activity {
           () ->
               CachePolicy.trim(
                   getCacheDir(),
-                  Long.parseLong(store.get("cacheMB", "500")) * 1048576,
+                  Math.max(1, TemporaryMedia.budget(Long.parseLong(store.get("cacheMB", "500")) * 1048576, getCacheDir().getUsableSpace())),
                   Integer.parseInt(store.get("cacheDays", "30"))));
     home("Home");
     if (getIntent().hasExtra("nextTitle"))
@@ -177,18 +181,22 @@ public class MainActivity extends Activity {
   }
 
   void shell(String active) {
-    generation++;
+    generation = ++nextGeneration;
     if (discovery != null) {
       discovery.cancel();
       discovery = null;
     }
-    if (updater != null) updater.close();
     if (tg != null) tg.listener = null;
     current = active;
     root = row();
+    root.setBaselineAligned(false);
     root.setGravity(Gravity.TOP);
     root.setBackgroundColor(TvUi.BG);
+    root.setClipChildren(false);
     nav = column();
+    nav.setClipChildren(false);
+    nav.setClipToPadding(false);
+    nav.setElevation(dp(12));
     nav.setGravity(Gravity.CENTER_HORIZONTAL);
     nav.setPadding(0, dp(22), 0, dp(14));
     nav.setBackgroundColor(0xff0d1017);
@@ -202,33 +210,40 @@ public class MainActivity extends Activity {
         new String[] {
           "Home", "Movies", "Series", "Search", "Telegram", "Live TV", "Library", "More"
         }) {
-      LinearLayout item = column();
-      item.setGravity(Gravity.CENTER);
+      FrameLayout item = new FrameLayout(this);
+      item.setClipChildren(false);
       item.setFocusable(true);
       item.setClickable(true);
       item.setContentDescription(name);
-      item.setPadding(0, dp(4), 0, dp(4));
+      View focusHalo = new View(this);
+      GradientDrawable halo = TvUi.shape(androidx.core.graphics.ColorUtils.blendARGB(TvUi.BG, TvUi.accent(store), .20f), 10, this);
+      halo.setStroke(dp(1.5f), TvUi.accent(store)); focusHalo.setBackground(halo); focusHalo.setVisibility(View.GONE);
+      focusHalo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+      item.addView(focusHalo, new FrameLayout.LayoutParams(dp(180), dp(46)));
       TvUi.Icon icon = new TvUi.Icon(this, name, name.equals(active) ? INK : MUTED);
-      item.addView(icon, new LinearLayout.LayoutParams(dp(20), dp(20)));
-      TextView label =
-          text(name.equals("More") ? "Settings" : name, 9, name.equals(active) ? INK : MUTED);
-      label.setPadding(0, dp(4), 0, 0);
-      label.setGravity(Gravity.CENTER);
-      item.addView(label);
+      item.addView(icon, new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
+      TextView label = text(name.equals("More") ? "Settings" : name, 14, INK);
+      label.setPadding(dp(14), 0, dp(18), 0);
+      label.setGravity(Gravity.CENTER_VERTICAL);
+      label.setVisibility(View.GONE);
+      label.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+      FrameLayout.LayoutParams labelParams = new FrameLayout.LayoutParams(dp(136), dp(46));
+      labelParams.leftMargin = dp(44);
+      item.addView(label, labelParams);
       LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(60), dp(46));
       ip.setMargins(0, 0, 0, dp(4));
       nav.addView(item, ip);
       if (name.equals(active)) item.setBackground(TvUi.shape(0xff232936, 10, this));
       item.setOnFocusChangeListener(
           (v, f) -> {
-            item.setBackground(
-                TvUi.shape(f ? INK : name.equals(current) ? 0xff232936 : 0xff0d1017, 10, this));
-            icon.tint(f ? TvUi.BG : name.equals(current) ? INK : MUTED);
-            label.setTextColor(f ? TvUi.BG : name.equals(current) ? INK : MUTED);
+            item.setBackground(TvUi.shape(name.equals(current) ? 0xff232936 : 0xff0d1017, 10, this));
+            focusHalo.setVisibility(f ? View.VISIBLE : View.GONE);
+            icon.tint(f || name.equals(current) ? INK : MUTED);
+            label.setVisibility(f ? View.VISIBLE : View.GONE);
           });
       item.setOnClickListener(
           v -> {
-            back.clear();
+            back.clear(); retainedGenerations.clear(); pendingScreens.clear();
             home(name);
           });
     }
@@ -245,6 +260,7 @@ public class MainActivity extends Activity {
     scroll.setFillViewport(true);
     scroll.setVerticalScrollBarEnabled(false);
     content = column();
+    lastContentFocus = null;
     content.setPadding(0, 0, 0, dp(35));
     scroll.addView(content);
     root.addView(scroll, new LinearLayout.LayoutParams(0, -1, 1));
@@ -259,6 +275,12 @@ public class MainActivity extends Activity {
     content.addView(t);
   }
 
+  void deliver(int ticket, Runnable update) {
+    if (isFinishing() || isDestroyed()) return;
+    if (ticket == generation) update.run();
+    else if (retainedGenerations.contains(ticket)) pendingScreens.computeIfAbsent(ticket, key -> new ArrayList<>()).add(update);
+  }
+
   <T> void load(Task<T> task, Consumer<T> done) {
     int ticket = generation;
     Api.IO.execute(
@@ -267,12 +289,12 @@ public class MainActivity extends Activity {
             T value = task.run();
             runOnUiThread(
                 () -> {
-                  if (!isFinishing() && ticket == generation) done.accept(value);
+                  deliver(ticket, () -> done.accept(value));
                 });
           } catch (Exception e) {
             runOnUiThread(
                 () -> {
-                  if (ticket == generation) error(e);
+                  deliver(ticket, () -> error(e));
                 });
           }
         });
@@ -334,8 +356,7 @@ public class MainActivity extends Activity {
           try {
             List<JSONObject> items = api.catalog("trending/movie/week", "movie");
             runOnUiThread(
-                () -> {
-                  if (ticket != generation) return;
+                () -> deliver(ticket, () -> {
                   content.removeView(loading);
                   if (!items.isEmpty()) hero(items.get(0));
                   List<JSONObject> history = new ArrayList<>();
@@ -349,16 +370,15 @@ public class MainActivity extends Activity {
                   load(
                       () -> api.catalog("movie/top_rated", "movie"),
                       r -> shelf("The ones worth watching", r, this::detail, true));
-                });
+                }));
           } catch (Exception e) {
             runOnUiThread(
-                () -> {
-                  if (ticket != generation) return;
+                () -> deliver(ticket, () -> {
                   status.setText(
                       "The catalog could not be reached. Check your connection or TMDB settings.");
                   loading.addView(button("Try again", () -> home("Home")));
                   loading.addView(button("Open connected libraries", () -> home("Library")));
-                });
+                }));
           }
         });
   }
@@ -425,144 +445,45 @@ public class MainActivity extends Activity {
   }
 
   void hero(JSONObject item, boolean details) {
-    FrameLayout hero = new FrameLayout(this);
-    hero.setBackgroundColor(TvUi.BG);
-    int height = details ? 310 : 278;
-    content.addView(hero, new LinearLayout.LayoutParams(-1, dp(height)));
-    ImageView backdrop = new ImageView(this);
-    backdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
-    FrameLayout.LayoutParams imageParams = new FrameLayout.LayoutParams(-1, -1);
-    imageParams.leftMargin = dp(180);
-    hero.addView(backdrop, imageParams);
-    String art = item.optString("backdrop_path");
-    if (!art.isEmpty())
-      Glide.with(this).load("https://image.tmdb.org/t/p/w1280" + art).into(backdrop);
-    View shade = new View(this);
-    shade.setBackground(
-        new GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            new int[] {TvUi.BG, 0xf5080a10, 0xa6080a10, 0x05080a10}));
-    hero.addView(shade, new FrameLayout.LayoutParams(-1, -1));
-    View fade = new View(this);
-    fade.setBackground(
-        new GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM, new int[] {0x00080a10, TvUi.BG}));
-    FrameLayout.LayoutParams fadeP = new FrameLayout.LayoutParams(-1, dp(95), Gravity.BOTTOM);
-    hero.addView(fade, fadeP);
-    LinearLayout copy = column();
-    copy.setGravity(Gravity.CENTER_VERTICAL);
-    copy.setPadding(dp(28), dp(20), 0, dp(12));
-    hero.addView(copy, new FrameLayout.LayoutParams(dp(410), -1));
-    TextView eyebrow =
-        text(
-            details
-                ? "VELAGRAM  /  " + (item.optString("kind").equals("tv") ? "SERIES" : "MOVIE")
-                : "VELAGRAM  /  IN THE SPOTLIGHT",
-            10,
-            TvUi.accent(store));
-    eyebrow.setLetterSpacing(.16f);
-    eyebrow.setTypeface(null, Typeface.BOLD);
-    copy.addView(eyebrow);
-    TextView title = text(Models.title(item), details ? 37 : 39, INK);
-    title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-    title.setMaxLines(2);
-    title.setEllipsize(TextUtils.TruncateAt.END);
-    title.setLineSpacing(0, .98f);
-    LinearLayout.LayoutParams titleP = new LinearLayout.LayoutParams(-1, -2);
-    titleP.setMargins(0, dp(12), 0, dp(10));
-    copy.addView(title, titleP);
-    TextView meta =
-        text(
-            Models.year(item)
-                + "   •   "
-                + (item.optString("kind").equals("tv") ? "Series" : "Movie")
-                + "   •   ★ "
-                + String.format(Locale.US, "%.1f", item.optDouble("vote_average")),
-            12,
-            0xffc7cbd4);
-    copy.addView(meta);
-    TextView overview = text(item.optString("overview"), 13, MUTED);
-    overview.setMaxLines(details ? 3 : 2);
-    overview.setEllipsize(TextUtils.TruncateAt.END);
-    overview.setLineSpacing(dp(3), 1);
-    overview.setPadding(0, dp(12), dp(12), dp(16));
-    copy.addView(overview);
-    LinearLayout actions = row();
-    actions.addView(
-        primary(
-            details
-                ? (item.optString("kind").equals("tv") ? "▷  Choose episode" : "▷  Find sources")
-                : "▷  Explore title",
-            () -> {
-              if (!details) detail(item);
-              else if (item.optString("kind").equals("tv")) seasons(item);
-              else sources(item, 0, 0);
+    View hero = DetailHero.create(this, item, details, store,
+        () -> {
+          if (!details) detail(item);
+          else if (item.optString("kind").equals("tv")) {
+            View episodes = content.findViewWithTag("episode-section");
+            if (episodes != null) episodes.requestFocus(); else seasons(item);
+          } else sources(item, 0, 0);
+        },
+        () -> {
+          if (store.contains("watchlist", item)) store.remove("watchlist", item);
+          else store.upsert("watchlist", item);
+        },
+        () -> TvUi.sheet(this, Models.title(item), "Your library",
+            new String[] {store.contains("watched", item) ? "Mark unwatched" : "Mark watched", "Remove from Continue watching"},
+            -1, index -> {
+              if (index == 0) {
+                if (store.contains("watched", item)) store.remove("watched", item); else store.upsert("watched", item);
+              } else for (JSONObject history : store.items("history"))
+                if (history.optJSONObject("catalog") != null && Models.key(history.optJSONObject("catalog")).equals(Models.key(item))) store.removeContinueWatching(history);
             }));
-    TextView save =
-        TvUi.button(
-            this,
-            store.contains("watchlist", item) ? "✓  My list" : "＋  My list",
-            false,
-            () -> {
-              if (store.contains("watchlist", item)) store.remove("watchlist", item);
-              else store.upsert("watchlist", item);
-              Toast.makeText(this, "My list updated", Toast.LENGTH_SHORT).show();
-            });
-    actions.addView(save, new LinearLayout.LayoutParams(-2, dp(42)));
-    if (details) {
-      TextView options =
-          TvUi.button(
-              this,
-              "···",
-              false,
-              () ->
-                  TvUi.sheet(
-                      this,
-                      Models.title(item),
-                      "Your library",
-                      new String[] {
-                        store.contains("watched", item) ? "Mark unwatched" : "Mark watched",
-                        "Remove from Continue watching"
-                      },
-                      -1,
-                      i -> {
-                        if (i == 0) {
-                          if (store.contains("watched", item)) store.remove("watched", item);
-                          else store.upsert("watched", item);
-                        } else
-                          for (JSONObject history : store.items("history"))
-                            if (history.optJSONObject("catalog") != null
-                                && Models.key(history.optJSONObject("catalog"))
-                                    .equals(Models.key(item))) store.removeContinueWatching(history);
-                      }));
-      LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(dp(42), dp(42));
-      op.setMargins(dp(9), 0, 0, 0);
-      actions.addView(options, op);
-    }
-    copy.addView(actions);
-    TextView top = text("VELAGRAM", 10, 0xffb9c1d2);
-    top.setLetterSpacing(.24f);
-    FrameLayout.LayoutParams word = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-    word.setMargins(0, dp(20), dp(28), 0);
-    hero.addView(top, word);
+    if (details) hero.setTag("detail-hero");
+    content.addView(hero, new LinearLayout.LayoutParams(-1, dp(details ? 290 : 260)));
+    if (!details && initialFocusPending) { initialFocusPending = false; hero.post(() -> { hero.requestFocus(); lastContentFocus = hero; }); }
+    else if (details) hero.post(() -> {
+      if (content.findViewWithTag("detail-hero") == hero && hasWindowFocus()) { hero.requestFocus(); lastContentFocus = hero; }
+    });
   }
 
   void shelf(String name, List<JSONObject> items, Consumer<JSONObject> action, boolean poster) {
     if (items.isEmpty()) return;
     TextView title = text(name, 19, INK);
     title.setTypeface(null, Typeface.BOLD);
-    title.setPadding(dp(28), dp(12), dp(26), dp(9));
+    title.setTextSize(16);
+    title.setPadding(dp(28), dp(10), dp(26), dp(4));
     content.addView(title);
-    HorizontalScrollView hs = new HorizontalScrollView(this);
-    hs.setClipToPadding(false);
-    hs.setHorizontalScrollBarEnabled(false);
-    LinearLayout r = row();
-    r.setGravity(Gravity.TOP);
-    r.setPadding(dp(28), dp(8), dp(28), dp(15));
-    r.setClipChildren(false);
-    for (JSONObject item : items) r.addView(card(item, action, poster));
-    hs.addView(r);
-    content.addView(hs);
+    View shelf = BrowseComponents.shelf(this, items, poster, action,
+        item -> { if (item.has("catalog")) continueMenu(item); else itemMenu(item); });
+    shelf.setTag(name.equals("More like this") ? "related-section" : "artwork-shelf");
+    content.addView(shelf, new LinearLayout.LayoutParams(-1, dp(poster ? 236 : 138)));
   }
 
   View card(JSONObject item, Consumer<JSONObject> action, boolean poster) {
@@ -650,7 +571,7 @@ public class MainActivity extends Activity {
           GradientDrawable border = TvUi.shape(f ? 0xff252c3a : 0x00000000, 9, this);
           if (f) border.setStroke(dp(2), INK);
           v.setBackground(border);
-          v.animate().scaleX(f ? 1.055f : 1).scaleY(f ? 1.055f : 1).setDuration(160).start();
+          artwork.animate().scaleX(f ? 1.04f : 1).scaleY(f ? 1.04f : 1).setDuration(175).start();
         });
     c.setOnClickListener(v -> action.accept(item));
     c.setOnLongClickListener(
@@ -663,25 +584,48 @@ public class MainActivity extends Activity {
 
   void grid(List<JSONObject> items, Consumer<JSONObject> action, boolean poster) {
     int count = poster ? 6 : 3;
-    LinearLayout row = null;
-    for (int i = 0; i < items.size(); i++) {
-      if (i % count == 0) {
-        row = row();
-        row.setGravity(Gravity.TOP);
-        row.setPadding(dp(28), dp(8), 0, dp(8));
-        content.addView(row);
-      }
-      row.addView(card(items.get(i), action, poster));
+    for (int start = 0; start < items.size(); start += count) {
+      List<JSONObject> group = new ArrayList<>(items.subList(start, Math.min(items.size(), start + count)));
+      View cards = BrowseComponents.shelf(this, group, poster, action, this::itemMenu);
+      content.addView(cards, new LinearLayout.LayoutParams(-1, dp(poster ? 236 : 138)));
     }
   }
 
   void push(Runnable action) {
-    back.push(currentRoute == null ? () -> home(current) : currentRoute);
+    final int savedTicket = generation;
+    final Map<String, LinearLayout> savedProviderRows = new LinkedHashMap<>(providerRows);
+    final Map<String, TextView> savedProviderStatuses = new LinkedHashMap<>(providerStatuses);
+    final Set<String> savedReleaseIds = new HashSet<>(releaseIds);
+    retainedGenerations.add(savedTicket);
+    final LinearLayout savedRoot = root, savedNav = nav, savedContent = content;
+    final ScrollView savedScroll = scroll;
+    final View savedContentFocus = lastContentFocus;
+    final View savedFocus = getCurrentFocus();
+    final String savedCurrent = current;
+    final Runnable savedRoute = currentRoute;
+    back.push(() -> {
+      generation = savedTicket;
+      retainedGenerations.remove(savedTicket);
+      if (discovery != null) { discovery.cancel(); discovery = null; }
+      root = savedRoot; nav = savedNav; content = savedContent; scroll = savedScroll; lastContentFocus = savedContentFocus;
+      current = savedCurrent; currentRoute = savedRoute;
+      providerRows.clear(); providerRows.putAll(savedProviderRows);
+      providerStatuses.clear(); providerStatuses.putAll(savedProviderStatuses);
+      releaseIds.clear(); releaseIds.addAll(savedReleaseIds);
+      for (TextView status : providerStatuses.values()) if (status.getText().toString().equals("Searching")) status.setText("Search paused · Retry");
+      setContentView(root);
+      List<Runnable> updates = pendingScreens.remove(savedTicket);
+      if (updates != null) for (Runnable update : updates) update.run();
+      BrowseComponents.refresh(root);
+      if (savedFocus != null) savedFocus.post(savedFocus::requestFocus);
+    });
     currentRoute = action;
     action.run();
   }
 
-  void detail(JSONObject item) {
+  void detail(JSONObject item) { detail(item, ""); }
+
+  void detail(JSONObject item, String destination) {
     if (item.optString("kind").equals("person")) {
       person(item);
       return;
@@ -692,32 +636,43 @@ public class MainActivity extends Activity {
           shell(current);
           hero(item, true);
           note("Loading details…");
+          content.getChildAt(content.getChildCount() - 1).setTag("details-loading");
           load(
               () -> api.details(item),
               full -> {
                 selected = full;
-                content.removeAllViews();
-                hero(full, true);
-                LinearLayout actions = row();
-                actions.addView(button("Season / episode manually", () -> manualEpisode(full)));
-                actions.addView(
-                    button(
-                        store.contains("watched", full) ? "✓ Watched" : "Mark watched",
-                        () -> {
-                          store.upsert("watched", full);
-                          Toast.makeText(this, "Marked watched", Toast.LENGTH_SHORT).show();
-                        }));
-                if (full.optString("kind").equals("tv")) content.addView(actions);
+                View existingHero = content.findViewWithTag("detail-hero");
+                if (existingHero != null) DetailHero.update(existingHero, full, store);
+                else { content.removeAllViews(); hero(full, true); }
+                View loading = content.findViewWithTag("details-loading"); if (loading != null) content.removeView(loading);
+                content.addView(DetailHero.tabs(this,
+                    full.optString("kind").equals("tv") ? new String[] {"Episodes", "Cast & crew", "More like this"} : new String[] {"Overview", "Cast & crew", "More like this"},
+                    Arrays.asList(() -> focusSection(full.optString("kind").equals("tv") ? "episode-section" : "detail-hero"),
+                        () -> focusSection("cast-section"), () -> focusSection("related-section")), TvUi.accent(store)),
+                    new LinearLayout.LayoutParams(-1, dp(38)));
+                if (full.optString("kind").equals("tv")) episodeShelf(full, firstSeason(full), true);
                 cast(full);
-                if (full.optString("kind").equals("tv")) episodeShelf(full, firstSeason(full));
                 load(
                     () ->
                         api.catalog(
                             full.optString("kind") + "/" + full.optInt("id") + "/recommendations",
                             full.optString("kind")),
-                    r -> shelf("More like this", r, this::detail, true));
+                    r -> {
+                      if (r.isEmpty()) { TextView empty = text("No related titles are available.", 13, MUTED); empty.setPadding(dp(28), dp(20), dp(28), dp(20)); empty.setTag("related-section"); content.addView(empty); }
+                      else shelf("More like this", r, this::detail, true);
+                      if (destination.equals("related-section")) content.post(() -> focusSection(destination));
+                    });
+                if (!destination.isEmpty() && !destination.equals("related-section")) content.post(() -> focusSection(destination));
               });
         });
+  }
+
+  void focusSection(String tag) {
+    View target = content.findViewWithTag(tag);
+    if (target == null) return;
+    android.graphics.Rect rect = new android.graphics.Rect(); target.getDrawingRect(rect);
+    scroll.offsetDescendantRectToMyCoords(target, rect); scroll.smoothScrollTo(0, rect.top);
+    target.requestFocus();
   }
 
   int firstSeason(JSONObject item) {
@@ -728,9 +683,10 @@ public class MainActivity extends Activity {
 
   void cast(JSONObject item) {
     JSONObject credits = item.optJSONObject("credits");
-    if (credits == null) return;
-    List<JSONObject> cast = Models.list(credits.optJSONArray("cast"));
-    if (cast.isEmpty()) return;
+    List<JSONObject> cast = credits == null ? Collections.emptyList() : Models.list(credits.optJSONArray("cast"));
+    if (cast.isEmpty()) {
+      TextView empty = text("Cast information is not available.", 13, MUTED); empty.setPadding(dp(28), dp(20), dp(28), dp(20)); empty.setTag("cast-section"); content.addView(empty); return;
+    }
     TextView h = text("Cast & characters", 19, INK);
     h.setTypeface(null, Typeface.BOLD);
     h.setPadding(dp(28), dp(18), 0, dp(13));
@@ -775,6 +731,7 @@ public class MainActivity extends Activity {
           });
     }
     hs.addView(r);
+    hs.setTag("cast-section");
     content.addView(hs);
   }
 
@@ -803,81 +760,70 @@ public class MainActivity extends Activity {
     push(
         () -> {
           shell("Series");
-          eyebrow(Models.title(item));
-          heading("Season " + season, "Choose an episode to search all your sources.");
-          content.addView(button("Enter season / episode", () -> manualEpisode(item)));
+          content.addView(DetailHero.compact(this, item, store, "Episodes"), new LinearLayout.LayoutParams(-1, dp(162)));
+          content.addView(DetailHero.tabs(this, new String[] {"Episodes", "Overview", "More like this"},
+              Arrays.asList(() -> focusSection("episode-section"), () -> detail(item, "detail-hero"), () -> detail(item, "related-section")), TvUi.accent(store)), new LinearLayout.LayoutParams(-1, dp(38)));
           episodeShelf(item, season);
         });
   }
 
-  void episodeShelf(JSONObject title, int season) {
+  void episodeShelf(JSONObject title, int season) { episodeShelf(title, season, false); }
+
+  void episodeShelf(JSONObject title, int season, boolean horizontal) {
+    LinearLayout section = column();
+    section.setTag(R.id.presentation_mode, horizontal);
+    content.addView(section);
+    renderEpisodeSeason(section, title, season, false);
+  }
+
+  void renderEpisodeSeason(LinearLayout section, JSONObject title, int season, boolean focusEpisode) {
+    section.setTag(season);
+    section.removeAllViews();
+    TextView picker = TvUi.button(this, "Season " + season + "  ▾", false, () -> {
+      List<JSONObject> seasons = Models.list(title.optJSONArray("seasons"));
+      if (seasons.isEmpty()) { seasons(title); return; }
+      String[] names = new String[seasons.size()]; int selectedSeason = 0;
+      for (int i = 0; i < names.length; i++) { names[i] = seasons.get(i).optString("name"); if (seasons.get(i).optInt("season_number") == season) selectedSeason = i; }
+      TvUi.sheet(this, "Choose a season", Models.title(title), names, selectedSeason,
+          index -> renderEpisodeSeason(section, title, seasons.get(index).optInt("season_number"), true));
+    });
+    picker.setTextSize(12); picker.setPadding(dp(14), dp(8), dp(14), dp(8));
+    picker.setTag("episode-section");
+    LinearLayout toolbar = row(); toolbar.setPadding(dp(28), dp(8), dp(28), dp(8));
+    toolbar.addView(picker, new LinearLayout.LayoutParams(-2, dp(32)));
+    View gap = new View(this); toolbar.addView(gap, new LinearLayout.LayoutParams(0, 1, 1));
+    TextView manual = TvUi.button(this, "Enter episode", false, () -> manualEpisode(title));
+    manual.setTextSize(11); manual.setPadding(dp(12), 0, dp(12), 0);
+    toolbar.addView(manual, new LinearLayout.LayoutParams(-2, dp(32)));
+    section.addView(toolbar);
+    if (!focusEpisode && !Boolean.TRUE.equals(section.getTag(R.id.presentation_mode))) picker.post(() -> {
+      if (picker.isAttachedToWindow() && hasWindowFocus()) picker.requestFocus();
+    });
     load(
         () ->
             Models.list(
                 api.tmdb("tv/" + title.optInt("id") + "/season/" + season)
                     .optJSONArray("episodes")),
         episodes -> {
-          TextView h = text("Episodes · Season " + season, 19, INK);
-          h.setTypeface(null, Typeface.BOLD);
-          h.setPadding(dp(28), dp(16), 0, dp(10));
-          content.addView(h);
+          if (!Integer.valueOf(season).equals(section.getTag())) return;
+          if (Boolean.TRUE.equals(section.getTag(R.id.presentation_mode))) {
+            List<JSONObject> requests = new ArrayList<>();
+            for (JSONObject episode : episodes) { JSONObject request = episodeRequest(title, season, episode); requests.add(request); episodeMetadata.put(Store.progressKey(request), episode); }
+            View cards = BrowseComponents.episodes(this, episodes, requests, store,
+                request -> sources(title, season, request.optInt("episode")),
+                request -> episodeMenu(request, episodeMetadata.get(Store.progressKey(request))));
+            section.addView(cards, new LinearLayout.LayoutParams(-1, dp(148)));
+            if (focusEpisode) cards.post(cards::requestFocus);
+            return;
+          }
           for (JSONObject episode : episodes) {
             JSONObject request = episodeRequest(title, season, episode);
             episodeMetadata.put(Store.progressKey(request), episode);
-            LinearLayout row = row();
-            row.setFocusable(true);
-            row.setClickable(true);
-            row.setPadding(dp(12), dp(10), dp(16), dp(10));
-            row.setBackground(TvUi.shape(TvUi.SURFACE, 10, this));
-            LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, dp(100));
-            rp.setMargins(dp(28), 0, dp(28), dp(8));
-            content.addView(row, rp);
-            ImageView still = new ImageView(this);
-            still.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            still.setBackground(TvUi.shape(0xff202735, 6, this));
-            still.setClipToOutline(true);
-            FrameLayout thumbnail = new FrameLayout(this);
-            thumbnail.addView(still, new FrameLayout.LayoutParams(-1, -1));
-            row.addView(thumbnail, new LinearLayout.LayoutParams(dp(135), dp(76)));
-            JSONObject saved = store.progressFor(request);
-            if (saved != null && saved.optLong("duration") > 0) {
-              ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-              progress.setMax(1000); progress.setProgress((int) (1000.0 * saved.optLong("position") / saved.optLong("duration")));
-              progress.setProgressTintList(android.content.res.ColorStateList.valueOf(TvUi.accent(store)));
-              thumbnail.addView(progress, new FrameLayout.LayoutParams(-1, dp(3), Gravity.BOTTOM));
-            }
-            if (store.isWatched(request)) {
-              TextView check = text("✓", 16, 0xff66dfb3); check.setPadding(dp(6), dp(3), dp(6), dp(3));
-              check.setBackground(TvUi.shape(0xc0080a10, 12, this));
-              thumbnail.addView(check, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT));
-            }
-            if (!episode.optString("still_path").isEmpty())
-              Glide.with(this)
-                  .load("https://image.tmdb.org/t/p/w300" + episode.optString("still_path"))
-                  .into(still);
-            LinearLayout copy = column();
-            copy.setPadding(dp(18), 0, 0, 0);
-            row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
-            TextView name =
-                text(episode.optInt("episode_number") + ". " + episode.optString("name"), 15, INK);
-            name.setTypeface(null, Typeface.BOLD);
-            copy.addView(name);
-            TextView desc = text(episode.optString("overview"), 12, MUTED);
-            desc.setMaxLines(2);
-            desc.setEllipsize(TextUtils.TruncateAt.END);
-            desc.setPadding(0, dp(6), 0, 0);
-            copy.addView(desc);
-            row.addView(
-                text(
-                    episode.optInt("runtime", 0) > 0 ? episode.optInt("runtime") + " min" : "▷",
-                    12,
-                    MUTED));
-            row.setOnFocusChangeListener(
-                (v, f) -> {
-                  v.setBackground(TvUi.shape(f ? 0xff303b50 : TvUi.SURFACE, 10, this));
-                });
-            row.setOnClickListener(v -> sources(title, season, episode.optInt("episode_number")));
-            row.setOnLongClickListener(v -> { episodeMenu(request, episode); return true; });
+            View episodeRow = BrowseComponents.episode(this, episode, request, store,
+                () -> sources(title, season, episode.optInt("episode_number")),
+                () -> episodeMenu(request, episode));
+            section.addView(episodeRow, new LinearLayout.LayoutParams(-1, dp(104)));
+            if (focusEpisode && section.getChildCount() == 2) episodeRow.post(episodeRow::requestFocus);
           }
         });
   }
@@ -941,11 +887,20 @@ public class MainActivity extends Activity {
 
   void showSources(JSONObject item, int season, int episode) {
     shell(current);
-    eyebrow("YOUR LIBRARIES. ONE SEARCH.");
-    heading(
-        "Find your stream",
-        Models.title(item) + (season > 0 ? " · Season " + season + ", Episode " + episode : ""));
+    JSONObject episodeInfo = episodeMetadata.get(Store.progressKey(Models.json("catalog", item, "season", season, "episode", episode)));
+    content.addView(DetailHero.source(this, item, store, season, episode, episodeInfo), new LinearLayout.LayoutParams(-1, dp(176)));
+    final String[] providerFilter = {"All"};
     LinearLayout controls = row();
+    TextView filter = button("Providers · All", () -> {});
+    filter.setOnClickListener(v -> {
+      List<String> options = new ArrayList<>(); options.add("All"); options.addAll(providerRows.keySet());
+      TvUi.sheet(this, "Providers", "Filter available results", options.toArray(new String[0]), options.indexOf(providerFilter[0]), index -> {
+        providerFilter[0] = options.get(index); filter.setText("Providers · " + providerFilter[0]);
+        for (Map.Entry<String, LinearLayout> group : providerRows.entrySet())
+          group.getValue().setVisibility(providerFilter[0].equals("All") || providerFilter[0].equals(group.getKey()) ? View.VISIBLE : View.GONE);
+      });
+    });
+    controls.addView(filter);
     controls.addView(button("↻  Search again", () -> showSources(item, season, episode)));
     if (item.optString("kind").equals("tv"))
       controls.addView(button("Change episode", () -> manualEpisode(item)));
@@ -957,7 +912,14 @@ public class MainActivity extends Activity {
                     "Stream URL",
                     "https://",
                     url -> playTitle(Models.json("url", url), item, season, episode))));
+    controls.setPadding(dp(28), dp(4), dp(28), dp(10));
+    for (int index = 0; index < controls.getChildCount(); index++) if (controls.getChildAt(index) instanceof TextView) {
+      TextView control = (TextView) controls.getChildAt(index); control.setTextSize(11); control.setPadding(dp(14), 0, dp(14), 0);
+      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(32)); p.setMargins(0, 0, dp(8), 0); control.setLayoutParams(p);
+    }
     content.addView(controls);
+    final int focusTicket = generation;
+    filter.post(() -> { if (focusTicket == generation && hasWindowFocus()) filter.requestFocus(); });
     providerRows.clear();
     providerStatuses.clear();
     releaseIds.clear();
@@ -973,63 +935,50 @@ public class MainActivity extends Activity {
           TextView state = providerStatuses.get(provider);
           if (group == null) {
             group = column();
-            group.setPadding(dp(18), dp(14), dp(18), dp(12));
-            group.setBackground(TvUi.shape(TvUi.SURFACE, 12, this));
+            group.setPadding(dp(12), dp(8), dp(12), dp(8));
+            group.setBackground(TvUi.shape(0xff10141d, 8, this));
             LinearLayout.LayoutParams gp = new LinearLayout.LayoutParams(-1, -2);
             gp.setMargins(dp(28), dp(8), dp(28), 0);
             content.addView(group, gp);
-            LinearLayout head = row();
-            TextView name = text(provider, 16, INK);
+            LinearLayout head = row(); head.setPadding(dp(4), dp(5), dp(4), dp(5));
+            View marker = new View(this); marker.setBackground(TvUi.shape(TvUi.accent(store), 3, this));
+            LinearLayout.LayoutParams dot = new LinearLayout.LayoutParams(dp(3), dp(18)); dot.setMargins(0, 0, dp(10), 0); head.addView(marker, dot);
+            TextView name = text(provider, 13, INK);
             name.setTypeface(null, Typeface.BOLD);
             head.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             state = text(status, 11, MUTED);
             head.addView(state);
             group.addView(head);
             providerRows.put(provider, group);
+            group.setVisibility(providerFilter[0].equals("All") || providerFilter[0].equals(provider) ? View.VISIBLE : View.GONE);
             providerStatuses.put(provider, state);
           }
-          state.setText(status);
+          state.setText(status.equals("1 releases") ? "1 release" : status);
+          final View anchor = hasWindowFocus() ? getCurrentFocus() : null;
+          final int[] anchorPosition = new int[2];
+          if (anchor != null) anchor.getLocationOnScreen(anchorPosition);
           for (JSONObject release : releases) {
             String id =
                 provider
                     + ":"
                     + release.optString("id", release.optString("url", Models.title(release)));
             if (!releaseIds.add(id)) continue;
-            LinearLayout result = row();
-            result.setPadding(dp(12), dp(10), dp(12), dp(10));
-            result.setFocusable(true);
-            result.setClickable(true);
-            result.setBackground(TvUi.shape(0xff202633, 8, this));
-            LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
-            rp.setMargins(0, dp(10), 0, 0);
-            group.addView(result, rp);
-            LinearLayout copy = column();
-            TextView name = text(Models.title(release), 13, INK);
-            name.setMaxLines(2);
-            name.setEllipsize(TextUtils.TruncateAt.END);
-            copy.addView(name);
-            String info = release.optString("quality");
-            long size = release.optLong("size");
-            if (size > 0) info += "   " + String.format(Locale.US, "%.1f GB", size / 1073741824.0);
-            TextView meta = text(info.isBlank() ? "Available to play" : info, 10, MUTED);
-            meta.setPadding(0, dp(5), 0, 0);
-            copy.addView(meta);
-            result.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
-            result.addView(text("▷  Play", 13, INK));
-            result.setOnFocusChangeListener(
-                (v, f) -> v.setBackground(TvUi.shape(f ? 0xff39465f : 0xff202633, 8, this)));
-            result.setOnClickListener(
-                v ->
-                    load(
-                        () -> new SourceDiscovery(this, store).resolve(release),
-                        resolved -> {
-                          try {
-                            resolved.put("provider", provider);
-                          } catch (Exception ignored) {
-                          }
-                          playTitle(resolved, item, season, episode);
-                        }));
+            group.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            group.setPadding(0, dp(8), 0, dp(6));
+            View result = BrowseComponents.source(this, release, provider,
+                () -> load(
+                    () -> new SourceDiscovery(this, store).resolve(release),
+                    resolved -> {
+                      try { resolved.put("provider", provider); } catch (Exception ignored) { }
+                      playTitle(resolved, item, season, episode);
+                    }));
+            group.addView(result, new LinearLayout.LayoutParams(-1, dp(64)));
           }
+          if (anchor != null) content.post(() -> {
+            if (ticket != generation || anchor != getCurrentFocus() || !anchor.isAttachedToWindow()) return;
+            int[] position = new int[2]; anchor.getLocationOnScreen(position);
+            scroll.scrollBy(0, position[1] - anchorPosition[1]);
+          });
         });
   }
 
@@ -2153,9 +2102,18 @@ public class MainActivity extends Activity {
               button(
                   "Clear temporary cache",
                   () -> {
-                    delete(getCacheDir());
-                    Toast.makeText(this, "Cache cleared", Toast.LENGTH_SHORT).show();
+                    if (PlaybackService.activeSession != null) { Toast.makeText(this, "Try again after playback", Toast.LENGTH_SHORT).show(); return; }
+                    Api.IO.execute(() -> {
+                      CachePolicy.trim(getCacheDir(), 1, 0);
+                      runOnUiThread(() -> Toast.makeText(this, "Artwork cache cleared", Toast.LENGTH_SHORT).show());
+                    });
                   }));
+          note("Free space: " + getFilesDir().getUsableSpace() / 1048576 + " MB · streamed media expires after 24 hours when idle. Saved downloads are kept.");
+          content.addView(button("Clear temporary Telegram streams", () -> {
+            Telegram telegram = Telegram.get(this);
+            if (!telegram.ready()) { Toast.makeText(this, "Connect Telegram to manage its temporary files", Toast.LENGTH_LONG).show(); return; }
+            TemporaryMedia.trim(telegram, true, message -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+          }));
           content.addView(
               button(
                   "Manage saved downloads",
@@ -2684,7 +2642,8 @@ public class MainActivity extends Activity {
     if (refreshOnReturn && currentRoute != null) {
       refreshOnReturn = false;
       Downloads.reconcile(this);
-      currentRoute.run();
+      BrowseComponents.refresh(root);
+      if (getCurrentFocus() != null) getCurrentFocus().requestFocus();
     }
   }
 
@@ -2697,8 +2656,95 @@ public class MainActivity extends Activity {
     else super.onBackPressed();
   }
 
+  boolean inside(View child, View parent) {
+    for (View node = child; node != null; node = node.getParent() instanceof View ? (View) node.getParent() : null)
+      if (node == parent) return true;
+    return false;
+  }
+
+  void focusStops(View node, List<View> stops) {
+    if (node.getVisibility() != View.VISIBLE || !node.isEnabled() || Boolean.FALSE.equals(node.getTag(R.id.focus_stop))) return;
+    if (node instanceof androidx.compose.ui.platform.ComposeView || node.isFocusable()) { stops.add(node); return; }
+    if (node instanceof ViewGroup) for (int index = 0; index < ((ViewGroup) node).getChildCount(); index++) focusStops(((ViewGroup) node).getChildAt(index), stops);
+  }
+
+  android.graphics.Rect contentBounds(View view, boolean focused) {
+    android.graphics.Rect rect = new android.graphics.Rect();
+    if (focused) view.getFocusedRect(rect); else view.getDrawingRect(rect);
+    content.offsetDescendantRectToMyCoords(view, rect);
+    return rect;
+  }
+
+  // Every Compose island is one vertical stop; horizontal movement remains within its real row.
+  // Explicit entry avoids ScrollView consuming Down merely as a scroll while focus stays in the hero.
+  boolean verticalFocus(int direction) {
+    View focus = getCurrentFocus();
+    if (focus != null && inside(focus, nav)) return false;
+    List<View> stops = new ArrayList<>(); focusStops(content, stops);
+    boolean composeStops = false;
+    for (View stop : stops) if (stop instanceof androidx.compose.ui.platform.ComposeView) composeStops = true;
+    if (!composeStops) return false;
+    View currentStop = null;
+    for (View stop : stops) if (focus != null && inside(focus, stop)) { currentStop = stop; break; }
+    if (currentStop == null && lastContentFocus != null && inside(lastContentFocus, content)) currentStop = lastContentFocus;
+    if (currentStop == null) return false;
+    android.graphics.Rect origin = focus != null && inside(focus, currentStop) ? contentBounds(focus, true) : contentBounds(currentStop, false);
+    View next = null; long best = Long.MAX_VALUE;
+    for (View stop : stops) {
+      if (stop == currentStop) continue;
+      android.graphics.Rect rect = contentBounds(stop, false);
+      int delta = rect.centerY() - origin.centerY();
+      if (direction == View.FOCUS_DOWN ? delta <= dp(6) : delta >= -dp(6)) continue;
+      int gap = direction == View.FOCUS_DOWN ? Math.max(0, rect.top - origin.bottom) : Math.max(0, origin.top - rect.bottom);
+      long score = gap * 10000L + Math.abs(rect.centerX() - origin.centerX());
+      if (score < best) { next = stop; best = score; }
+    }
+    if (next == null) return true;
+    if (next.requestFocus()) {
+      lastContentFocus = next;
+      android.graphics.Rect rect = new android.graphics.Rect(); next.getDrawingRect(rect);
+      next.requestRectangleOnScreen(rect, false);
+      return true;
+    }
+    return false;
+  }
+
+  @android.annotation.SuppressLint("RestrictedApi")
+  @Override public boolean dispatchKeyEvent(KeyEvent event) {
+    if (content != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+      View focused = getCurrentFocus();
+      List<View> stops = new ArrayList<>(); focusStops(content, stops);
+      for (View stop : stops) if (focused != null && inside(focused, stop)) { lastContentFocus = stop; break; }
+      int key = event.getKeyCode();
+      if ((key == KeyEvent.KEYCODE_DPAD_DOWN || key == KeyEvent.KEYCODE_DPAD_UP)
+          && verticalFocus(key == KeyEvent.KEYCODE_DPAD_DOWN ? View.FOCUS_DOWN : View.FOCUS_UP)) return true;
+      int intoContent = root.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT;
+      if (key == intoContent && focused != null && inside(focused, nav)) {
+        View target = lastContentFocus != null && inside(lastContentFocus, content) ? lastContentFocus : stops.isEmpty() ? null : stops.get(0);
+        if (target != null && target.requestFocus()) return true;
+        for (View stop : stops) if (stop.requestFocus()) { lastContentFocus = stop; return true; }
+      }
+    }
+    boolean handled = super.dispatchKeyEvent(event);
+    int towardNav = root != null && root.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL ? KeyEvent.KEYCODE_DPAD_RIGHT : KeyEvent.KEYCODE_DPAD_LEFT;
+    if (!handled && event.getAction() == KeyEvent.ACTION_DOWN && event.getKeyCode() == towardNav
+        && getCurrentFocus() != null && inside(getCurrentFocus(), content)) {
+      for (int index = 0; index < nav.getChildCount(); index++) {
+        View item = nav.getChildAt(index);
+        if (current.contentEquals(item.getContentDescription() == null ? "" : item.getContentDescription())) return item.requestFocus();
+      }
+    }
+    return handled;
+  }
+
+  @Override public void onUserInteraction() {
+    super.onUserInteraction(); initialFocusPending = false;
+  }
+
   @Override
   protected void onDestroy() {
+    generation = ++nextGeneration; retainedGenerations.clear(); pendingScreens.clear();
+    if (discovery != null) discovery.cancel();
     if (updater != null) updater.close();
     if (tg != null) tg.listener = null;
     super.onDestroy();

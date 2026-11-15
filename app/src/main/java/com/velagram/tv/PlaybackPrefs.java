@@ -30,9 +30,15 @@ public final class PlaybackPrefs {
 
   public static String context(JSONObject media) {
     int season = media.optInt("season"), episode = media.optInt("episode");
-    return season > 0
-        ? "Season " + season + "  ·  Episode " + episode
-        : media.optString("provider", media.optString("group", "Velagram player"));
+    if (Store.episode(media)) return "Season " + season + "  ·  Episode " + episode;
+    JSONObject title = media.optJSONObject("catalog");
+    if (title != null) {
+      java.util.List<String> metadata = new java.util.ArrayList<>();
+      if (!Models.year(title).isBlank()) metadata.add(Models.year(title));
+      if (title.optInt("runtime") > 0) metadata.add(title.optInt("runtime") + " min");
+      if (!metadata.isEmpty()) return String.join("  ·  ", metadata);
+    }
+    return media.optString("provider", media.optString("group", "Velagram player"));
   }
 
   public static boolean useVlc(Store store, JSONObject media) {
@@ -41,6 +47,6 @@ public final class PlaybackPrefs {
     if (engine.equals("Media3")) return false;
     String candidate =
         media.optString("url") + " " + media.optString("filename", media.optString("name"));
-    return candidate.toLowerCase(java.util.Locale.ROOT).matches(".*\\.(mkv|avi)(?:[? ].*)?$");
+    return candidate.toLowerCase(java.util.Locale.ROOT).matches(".*\\.avi(?:[? ].*)?$");
   }
 }
