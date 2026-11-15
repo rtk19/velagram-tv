@@ -9,6 +9,7 @@ import org.junit.*;
 /** Regression cases translated from iOS PlaybackProgressTests.swift. */
 public class LibraryParityTest {
   Store store;
+  PreferenceSnapshot snapshot;
   String previous;
   JSONObject show = Models.json("id", 111, "kind", "tv", "name", "Parity show");
   JSONObject episode(int season, int number) {
@@ -16,13 +17,14 @@ public class LibraryParityTest {
   }
   @Before public void setup() {
     store = new Store(InstrumentationRegistry.getInstrumentation().getTargetContext());
+    snapshot = new PreferenceSnapshot(store);
     previous = store.profile(); store.put("profile", "Parity " + UUID.randomUUID());
   }
   @After public void cleanup() {
     String prefix = "profile." + store.profile() + ".";
     android.content.SharedPreferences.Editor editor = store.prefs.edit();
     for (String key : store.prefs.getAll().keySet()) if (key.startsWith(prefix)) editor.remove(key);
-    editor.apply(); store.put("profile", previous);
+    editor.apply(); snapshot.restore();
   }
   void progress(JSONObject item, long position) { store.progress(Store.progressKey(item), position, 1800000, item); }
   @Test public void separateEpisodePositionsOneCurrentSelectionAndReload() {

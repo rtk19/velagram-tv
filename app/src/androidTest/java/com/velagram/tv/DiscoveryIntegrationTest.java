@@ -13,12 +13,14 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 public class DiscoveryIntegrationTest {
   Store store;
+  PreferenceSnapshot snapshot;
   MockWebServer server;
 
   @Before
   public void setup() throws Exception {
     store = new Store(InstrumentationRegistry.getInstrumentation().getTargetContext());
-    store.put("profile", "Integration test");
+    snapshot = new PreferenceSnapshot(store);
+    store.put("profile", "Integration test " + UUID.randomUUID());
     server = new MockWebServer();
     server.start();
   }
@@ -26,11 +28,7 @@ public class DiscoveryIntegrationTest {
   @After
   public void cleanup() throws Exception {
     server.shutdown();
-    store.array("servers", new JSONArray());
-    store.array("xtream", new JSONArray());
-    store.array("channels", new JSONArray());
-    store.array("history", new JSONArray());
-    store.put("profile", "Me");
+    snapshot.restore();
   }
 
   void response(String json) {

@@ -1,0 +1,30 @@
+# iOS → TV parity implementation ledger
+
+Reference: read-only clone of `rtk19/velagram-ios` at `/tmp/velagram-ios-reference` (2026-11-15). Target remote is `rtk19/velagram-tv`; local folder is named `velagram-android-tv`. No iOS files modified. No booted iOS simulator or current iOS screenshots available: brand parity is source-inferred, not visually certified.
+
+| Outcome | Actual iOS ownership | TV ownership / implementation | Verification boundary |
+|---|---|---|---|
+| Graphite identity, 11 accents | Features/Views.swift, theme picker near 3391 | TvUi.java, BrowseComponents.kt immutable models and Compose artwork/episode components | Actual GOTV captures in artifacts/premium-visual; all themes retained |
+| Catalog, detail, seasons, people, recommendations | Features/Views.swift; Core/TMDBClient.swift, Models.swift | MainActivity.java, Api.java, BrowseComponents.kt | Existing API/services retained; Compose heroes, artwork shelves/grids and episode cards; Java route/service interop retained |
+| Inline episode dates | Core/Models.swift: MediaEpisode.releaseDate; Features/Views.swift: 3093, 3350, 3380 | EpisodeDate.java strictly parses date-only ISO; localized medium date below episode name | Missing/invalid dates omitted, tests include leap days and Hebrew |
+| Watched/progress/Next Up | Core/LibraryStore.swift | Store.java, EpisodeNavigator.java; Compose rows preserve watched, progress, synopsis, runtime and still | Persistence schema unchanged |
+| Sources / filters / provider status | Core/PlaybackDiscovery.swift, StreamSelectionPolicy | SourceDiscovery.java, MainActivity.showSources; Compose source cards, local provider filtering, append-only result groups | Existing server, web, IPTV, add-on, Telegram services retained |
+| Shared player / speed / seek / resume | Features/NativePlayer.swift, Telegram/TelegramPlayerView.swift | PlayerOverlay.kt shared Compose composition plus CinemaControls.Playback adapter, PlayerActivity/VlcActivity and PlaybackPrefs | Engine badge removed; visible D-pad navigation and hidden toggle/seek preserved; sheet opener restoration; selected audio/subtitle tracks focus |
+| Track selection memory | Core/LibraryStore.swift subtitleSelectionPreferences | TrackMemory.java stores language/label/role intent per title; Media3 restores supported matching tracks and VLC restores matching exposed track descriptions | Language/label portability tests pass; unknown or unavailable metadata falls back to configured defaults |
+| Subtitle providers, offsets, Studio | Core/SubtitleProviders.swift; Features/NativePlayer.swift | SubtitleProviders, SubtitleStudioActivity, SubtitleTiming; player actions retained | Real provider/account behavior requires owner credentials |
+| Skip intro/credits and auto-next | Core/SkipSegments.swift, LibraryStore | SkipSegments, PlaybackJourney, EpisodeNavigator | Existing contract/playback tests retained |
+| Telegram browser / QR / topics / folders / saved media | Telegram source tree, TelegramPlayerView.swift | Telegram.java, TelegramMediaPage, TelegramLinks, TelegramDataSource, TelegramRelay | Do not disconnect existing account to test QR |
+| Bounded ephemeral streamed bytes | Telegram source tree; Core/SubtitleCache.swift | TemporaryMedia.java tracks only streamed file IDs; supported TDLib DeleteFile; global stream/download leases; cross-profile offline-save exclusions | Never deletes DB or blindly traverses TDLib dirs. Previously untracked files kept; live account eviction unverified |
+| Live / radio / IPTV / servers | Core providers and Idan assets | Api, Iptv, Xtream, MediaServer, original Idan assets | Preserved services; not every station/account certified |
+| Profiles / downloads / backup | Core/LibraryStore.swift, UserDataBackup.swift | Store, Downloads, MainActivity backup/settings | Android JSON backup remains platform-specific; no downloaded-byte iOS interchange |
+| Sleep timer / control lock | Telegram/TelegramPlayerView.swift:174,669–916; TelegramPlaybackSettings.swift | Shared CinemaControls timer pauses both engines; remote lock ignores accidental keys and Back unlocks | Session scoped; timer clears on player destruction |
+| Signed updates | Platform-specific | AppUpdater.java, UpdateRelease.java | Fixed shell closing updater before onResume; package/signing unchanged |
+| AirPlay / gestures / PiP | NativePlayer.swift, TelegramPlayerView.swift | D-pad equivalents; Media3 PiP existing | No AirPlay transmitter or VLC PiP implementation claimed |
+
+## Remaining work / verification
+
+This ledger is deliberately not a complete-parity certificate. Compose owns Home/detail heroes, artwork shelves, catalog/search/filmography grids, episode cards and source result cards. PlayerOverlay.kt now owns the shared premium player composition, retaining the real native transport controls in Compose AndroidView slots. The navigation shell, settings/forms and cast portraits retain Java views. A complete rewrite of these remaining presentation surfaces into Compose has not been completed. No existing service has been replaced or intentionally removed.
+
+The retained-screen navigation now queues pending catalog/detail/episode responses while a screen is on the Back stack, drains them on return and refreshes watched/progress state without rebuilding rows. Exact rendered focus/scroll restoration and pending response delivery have native tests. Process-death restoration remains unverified.
+
+Remaining differences include Android JSON versus iOS backup formats and embedded offline-byte interchange, standalone Telegram queue behavior, and exhaustive differences across all iOS settings. TrackMemory now preserves portable language/label/role intent, but cross-engine restoration cannot identify tracks when an engine/provider exposes no reliable language or label. These are actual limitations, not fake switches. No AirPlay/Google Cast sender or VLC PiP equivalence is claimed. Authenticated providers/Telegram streaming eviction, HDR/passthrough, subjective A/V sync and final visual judgment remain unverified.

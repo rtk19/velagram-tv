@@ -16,11 +16,13 @@ import java.util.*;
 import org.json.*;
 
 @androidx.media3.common.util.UnstableApi
-public class PlayerActivity extends Activity {
+public class PlayerActivity extends androidx.activity.ComponentActivity {
   ExoPlayer player;
   PlayerView view;
   MediaSession session;
   Store store;
+  boolean temporaryLease;
+  boolean restoringTracks;
   JSONObject media;
   String key;
   NextPreloader preloader;
@@ -49,6 +51,7 @@ public class PlayerActivity extends Activity {
     preloader = new NextPreloader(this, store);
     try {
       media = new JSONObject(getIntent().getStringExtra("media"));
+      if (media.optString("url").startsWith("td:")) { TemporaryMedia.acquire(); temporaryLease = true; }
       key = media.optString("progressKey", media.optString("id", media.optString("url")));
       playerRoot = new FrameLayout(this);
       playerRoot.setBackgroundColor(0xff000000);
@@ -57,6 +60,8 @@ public class PlayerActivity extends Activity {
       view.setFocusable(false);
       playerRoot.addView(view, new FrameLayout.LayoutParams(-1, -1));
       LinkedHashMap<String, Runnable> actions = new LinkedHashMap<>();
+      if (media.optJSONObject("catalog") != null) actions.put("Sources", this::otherSources);
+      if (Store.episode(media)) actions.put("Episodes", () -> PlayerPanels.episodes(this, store, media, this::persist));
       actions.put("Speed", this::speed);
       actions.put("Audio", () -> tracks(C.TRACK_TYPE_AUDIO));
       actions.put("Subtitles", this::subtitles);
@@ -69,6 +74,20 @@ public class PlayerActivity extends Activity {
               PlaybackPrefs.context(media),
               "Velagram",
               new CinemaControls.Playback() {
+                public float speed() { return player == null ? 1f : player.getPlaybackParameters().speed; }
+                public String track(boolean subtitles) {
+                  if (player == null) return "";
+                  if (subtitles && !PlaybackPrefs.subtitles(store, media)) return "Off";
+                  int type = subtitles ? C.TRACK_TYPE_TEXT : C.TRACK_TYPE_AUDIO;
+                  for (Tracks.Group group : player.getCurrentTracks().getGroups()) if (group.getType() == type)
+                    for (int index = 0; index < group.length; index++) if (group.isTrackSelected(index)) {
+                      Format format = group.getTrackFormat(index);
+                      if (format.language != null && !format.language.equals("und")) return Locale.forLanguageTag(format.language).getDisplayLanguage();
+                      return format.label == null ? "" : format.label;
+                    }
+                  return "";
+                }
+
                 public boolean playing() {
                   return player != null && player.isPlaying();
                 }
@@ -111,51 +130,20 @@ public class PlayerActivity extends Activity {
   }
 
   void options() {
-    TvUi.sheet(
-        this,
-        "Playback options",
-        "Preferences are remembered for this title.",
-        new String[] {
-          "Video quality",
-          "Picture: fit / zoom / fill",
-          "Play next episode",
-          "Choose another source",
-          "Use VLC player",
-          "Picture in picture",
-          "Repeat: " + (player.getRepeatMode() == Player.REPEAT_MODE_ONE ? "on" : "off")
-        },
-        -1,
-        i -> {
-          switch (i) {
-            case 0:
-              quality();
-              break;
-            case 1:
-              fit();
-              break;
-            case 2:
-              nextEpisode();
-              break;
-            case 3:
-              otherSources();
-              break;
-            case 4:
-              vlc();
-              break;
-            case 5:
-              if (getPackageManager().hasSystemFeature("android.software.picture_in_picture"))
-                enterPictureInPictureMode(
-                    new PictureInPictureParams.Builder()
-                        .setAspectRatio(new android.util.Rational(16, 9))
-                        .build());
-              break;
-            case 6:
-              player.setRepeatMode(
-                  player.getRepeatMode() == Player.REPEAT_MODE_ONE
-                      ? Player.REPEAT_MODE_OFF
-                      : Player.REPEAT_MODE_ONE);
-          }
-        });
+    LinkedHashMap<String, Runnable> options = new LinkedHashMap<>();
+    options.put("Video quality", this::quality);
+    options.put("Picture: fit / zoom / fill", this::fit);
+    if (Store.episode(media)) options.put("Play next episode", this::nextEpisode);
+    if (media.optJSONObject("catalog") != null) options.put("Choose another source", this::otherSources);
+    options.put("Use VLC player", this::vlc);
+    if (getPackageManager().hasSystemFeature("android.software.picture_in_picture")) options.put("Picture in picture", () ->
+        enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new android.util.Rational(16, 9)).build()));
+    options.put("Repeat: " + (player.getRepeatMode() == Player.REPEAT_MODE_ONE ? "on" : "off"), () ->
+        player.setRepeatMode(player.getRepeatMode() == Player.REPEAT_MODE_ONE ? Player.REPEAT_MODE_OFF : Player.REPEAT_MODE_ONE));
+    options.put("Sleep timer", controls::sleepTimer);
+    options.put("Lock controls", controls::lockControls);
+    TvUi.sheet(this, "Playback options", "Preferences are remembered for this title.", options.keySet().toArray(new String[0]), -1,
+        index -> new ArrayList<>(options.values()).get(index).run());
   }
 
   void quality() {
@@ -275,6 +263,8 @@ public class PlayerActivity extends Activity {
     player.seekTo(position);
     player.addListener(
         new Player.Listener() {
+          @Override public void onTracksChanged(Tracks tracks) { restoreTrackChoices(tracks); }
+
           @Override
           public void onPlayerError(PlaybackException e) {
             if ((e.errorCode >= 4000 && e.errorCode < 5000) || e.errorCode == 3003) {
@@ -350,11 +340,34 @@ public class PlayerActivity extends Activity {
         .show();
   }
 
+  void restoreTrackChoices(Tracks tracks) {
+    if (restoringTracks || player == null) return;
+    TrackSelectionParameters.Builder builder = player.getTrackSelectionParameters().buildUpon();
+    boolean changed = false;
+    for (int type : new int[] {C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT}) {
+      if (type == C.TRACK_TYPE_TEXT && !PlaybackPrefs.subtitles(store, media)) continue;
+      JSONObject intent = TrackMemory.read(store, media, type == C.TRACK_TYPE_TEXT);
+      int best = -1, index = -1; Tracks.Group group = null;
+      for (Tracks.Group candidate : tracks.getGroups()) if (candidate.getType() == type)
+        for (int track = 0; track < candidate.length; track++) {
+          if (!candidate.isTrackSupported(track)) continue;
+          Format format = candidate.getTrackFormat(track);
+          int score = TrackMemory.score(intent, format.language, format.label, format.roleFlags);
+          if (score > best) { best = score; index = track; group = candidate; }
+        }
+      if (group != null && !group.isTrackSelected(index)) {
+        builder.setOverrideForType(new TrackSelectionOverride(group.getMediaTrackGroup(), index)); changed = true;
+      }
+    }
+    if (changed) { restoringTracks = true; player.setTrackSelectionParameters(builder.build()); restoringTracks = false; }
+  }
+
   void tracks(int type) {
     List<String> labels = new ArrayList<>();
     List<Tracks.Group> groups = new ArrayList<>();
     List<Integer> indices = new ArrayList<>();
     labels.add(type == C.TRACK_TYPE_TEXT ? "Off" : "Automatic");
+    int selectedTrack = 0;
     for (Tracks.Group g : player.getCurrentTracks().getGroups())
       if (g.getType() == type)
         for (int i = 0; i < g.length; i++) {
@@ -365,14 +378,20 @@ public class PlayerActivity extends Activity {
                   + (f.language == null ? "" : f.language));
           groups.add(g);
           indices.add(i);
+          if (g.isTrackSelected(i)) selectedTrack = labels.size() - 1;
         }
     TvUi.sheet(
         this,
         type == C.TRACK_TYPE_TEXT ? "Subtitle tracks" : "Audio tracks",
         "",
         labels.toArray(new String[0]),
-        -1,
+        selectedTrack,
         w -> {
+          if (type == C.TRACK_TYPE_TEXT) PlaybackPrefs.subtitles(store, media, w > 0);
+          if (w > 0) {
+            Format chosen = groups.get(w - 1).getTrackFormat(indices.get(w - 1));
+            TrackMemory.save(store, media, type == C.TRACK_TYPE_TEXT, chosen.language, chosen.label, chosen.roleFlags);
+          } else if (type == C.TRACK_TYPE_AUDIO) TrackMemory.forget(store, media, false);
           TrackSelectionParameters.Builder b =
               player
                   .getTrackSelectionParameters()
@@ -629,6 +648,10 @@ public class PlayerActivity extends Activity {
         });
   }
 
+  // Intercept remote keys before focusable children, as the Activity contract requires.
+  // The public androidx.activity superclass inherits this method from a restricted core shim:
+  // https://android.googlesource.com/platform/frameworks/support/+/f2e05c341382db64d127118a13451dcaa554b702/core/core/src/main/java/androidx/core/app/ComponentActivity.java
+  @android.annotation.SuppressLint("RestrictedApi")
   @Override
   public boolean dispatchKeyEvent(KeyEvent e) {
     if (controls != null && controls.key(e)) return true;
@@ -670,6 +693,7 @@ public class PlayerActivity extends Activity {
     if (journey != null) journey.release();
     if (session != null) session.release();
     if (player != null) player.release();
+    if (temporaryLease) { TemporaryMedia.release(); temporaryLease = false; }
     super.onDestroy();
   }
 

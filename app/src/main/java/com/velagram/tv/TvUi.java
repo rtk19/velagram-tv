@@ -79,11 +79,11 @@ public final class TvUi {
     view.setBackground(shape(primary ? TEXT : 0xff202530, 8, c));
     view.setOnFocusChangeListener(
         (v, f) -> {
-          GradientDrawable d = shape(f ? TEXT : primary ? TEXT : 0xff202530, 8, c);
-          if (f) d.setStroke(dp(c, 2), 0xffffffff);
+          GradientDrawable d = shape(f && !primary ? 0xff293449 : primary ? TEXT : 0xff202530, 8, c);
+          if (f) d.setStroke(dp(c, 1.5f), accent(new Store(c)));
           v.setBackground(d);
-          if (v instanceof TextView) ((TextView) v).setTextColor(f || primary ? BG : TEXT);
-          v.animate().scaleX(f ? 1.04f : 1).scaleY(f ? 1.04f : 1).setDuration(140).start();
+          if (v instanceof TextView) ((TextView) v).setTextColor(primary ? BG : TEXT);
+          v.animate().scaleX(1).scaleY(1).setDuration(175).start();
         });
   }
 
@@ -104,7 +104,9 @@ public final class TvUi {
       String[] labels,
       int selected,
       IntConsumer action) {
+    final View opener = a.getCurrentFocus();
     Dialog dialog = new Dialog(a);
+    dialog.setOnDismissListener(d -> { if (opener != null && opener.isAttachedToWindow()) opener.post(opener::requestFocus); });
     LinearLayout box = col(a);
     box.setPadding(dp(a, 28), dp(a, 28), dp(a, 28), dp(a, 24));
     box.setBackgroundColor(0xff12151e);
@@ -121,6 +123,8 @@ public final class TvUi {
     }
     ScrollView scroll = new ScrollView(a);
     scroll.setClipToPadding(false);
+    scroll.setVerticalScrollBarEnabled(false);
+    scroll.setVerticalFadingEdgeEnabled(true); scroll.setFadingEdgeLength(dp(a, 18));
     scroll.setPadding(0, dp(a, 18), 0, 0);
     LinearLayout rows = col(a);
     for (int i = 0; i < labels.length; i++) {
@@ -136,7 +140,8 @@ public final class TvUi {
               });
       b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
       b.setTextSize(15);
-      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
+      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, dp(a, 44));
+      b.setMaxLines(1); b.setEllipsize(android.text.TextUtils.TruncateAt.END);
       p.setMargins(0, 0, 0, dp(a, 7));
       rows.addView(b, p);
     }
@@ -156,12 +161,14 @@ public final class TvUi {
       w.setAttributes(p);
     }
     dialog.show();
-    if (labels.length > 0) rows.getChildAt(Math.max(0, selected)).requestFocus();
+    if (labels.length > 0) rows.getChildAt(Math.min(labels.length - 1, Math.max(0, selected))).requestFocus();
   }
 
   public static Dialog panel(
       Activity a, String title, String subtitle, View body, String positive, Runnable save) {
+    final View opener = a.getCurrentFocus();
     Dialog dialog = new Dialog(a);
+    dialog.setOnDismissListener(d -> { if (opener != null && opener.isAttachedToWindow()) opener.post(opener::requestFocus); });
     LinearLayout box = col(a);
     box.setPadding(dp(a, 28), dp(a, 26), dp(a, 28), dp(a, 24));
     box.setBackground(shape(SURFACE, 18, a));
@@ -202,7 +209,7 @@ public final class TvUi {
   }
 
   public static class Icon extends View {
-    final String name;
+    String name;
     int color;
     final Paint p = new Paint(3);
 
@@ -212,6 +219,8 @@ public final class TvUi {
       color = tint;
       setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
     }
+
+    public void symbol(String value) { if (!name.equals(value)) { name = value; invalidate(); } }
 
     public void tint(int c) {
       color = c;
@@ -231,7 +240,35 @@ public final class TvUi {
       p.setStrokeJoin(Paint.Join.ROUND);
       p.setStyle(Paint.Style.STROKE);
       Path path = new Path();
+      if (name.startsWith("SeekBack:") || name.startsWith("SeekForward:")) {
+        boolean backward = name.startsWith("SeekBack:");
+        canvas.drawArc(3, 3, 21, 21, backward ? -70 : -110, backward ? 290 : -290, false, p);
+        if (backward) { canvas.drawLine(5, 3, 5, 8, p); canvas.drawLine(5, 8, 10, 7, p); }
+        else { canvas.drawLine(19, 3, 19, 8, p); canvas.drawLine(19, 8, 14, 7, p); }
+        p.setStyle(Paint.Style.FILL); p.setTextAlign(Paint.Align.CENTER); p.setTextSize(8);
+        p.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        canvas.drawText(name.substring(name.indexOf(':') + 1), 12, 15, p);
+        canvas.restore(); return;
+      }
       switch (name) {
+        case "Episodes":
+          for (int i = 0; i < 3; i++) { canvas.drawCircle(4, 6 + i * 6, .7f, p); canvas.drawLine(9, 6 + i * 6, 21, 6 + i * 6, p); }
+          break;
+        case "Audio":
+          for (int i = 0; i < 5; i++) { int h = i == 2 ? 9 : i % 2 == 1 ? 5 : 2; canvas.drawLine(4 + i * 4, 12 - h, 4 + i * 4, 12 + h, p); }
+          break;
+        case "Subtitles":
+          canvas.drawRoundRect(2, 4, 22, 20, 3, 3, p);
+          p.setStyle(Paint.Style.FILL); p.setTextSize(9); p.setTextAlign(Paint.Align.CENTER);
+          p.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL)); canvas.drawText("CC", 12, 15, p);
+          break;
+        case "Speed":
+          canvas.drawArc(2, 3, 22, 23, 180, 180, false, p);
+          canvas.drawLine(12, 14, 17, 7, p); canvas.drawCircle(12, 14, 1, p);
+          break;
+        case "Sources":
+          for (int i = 0; i < 3; i++) { canvas.drawRoundRect(3, 2 + i * 7, 21, 7 + i * 7, 1, 1, p); canvas.drawPoint(6, 4 + i * 7, p); }
+          break;
         case "Home":
           path.moveTo(3, 11);
           path.lineTo(12, 3);
