@@ -40,7 +40,7 @@ final class AppUpdater {
     } else check(false);
   }
   void check(boolean manual) {
-    if (busy) { if (manual) message("An update check or download is already running."); return; }
+    if (busy) { if (manual) Toast.makeText(activity, "An update check or download is already running.", Toast.LENGTH_SHORT).show(); return; }
     long now = System.currentTimeMillis();
     if (!manual && now - prefs.getLong("lastCheck", 0) < TimeUnit.HOURS.toMillis(6)) return;
     File saved = new File(activity.getFilesDir(), "updates/update.apk");
