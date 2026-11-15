@@ -1,0 +1,65 @@
+name: Android
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Prepare disposable test signing key
+        run: |
+          mkdir -p config
+          keytool -genkeypair -keystore config/velagram-tv.jks -storepass velagram-local -alias velagram -keypass velagram-local -dname 'CN=CI Tests' -keyalg RSA -keysize 3072 -validity 2 -noprompt
+      - run: ./gradlew testDebugUnitTest lintRelease
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Restore release signing identity
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SERVICE_CONFIG: ${{ secrets.ANDROID_SERVICE_CONFIG }}
+        run: |
+          test -n "$KEYSTORE" || { echo 'Missing ANDROID_KEYSTORE_BASE64 repository secret'; exit 1; }
+          mkdir -p config
+          printf '%s' "$KEYSTORE" | base64 --decode > config/velagram-tv.jks
+          printf '%s' "$SERVICE_CONFIG" > config/local.properties
+      - name: Validate tag and build
+        run: |
+          VERSION=$(sed -n "s/.*versionName '\([^']*\)-tv'.*/\1/p" app/build.gradle)
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          ./gradlew assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk velagram-tv-universal.apk
+          sha256sum velagram-tv-universal.apk > SHA256SUMS
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" velagram-tv-universal.apk SHA256SUMS --draft --verify-tag --generate-notes --title "Velagram TV $GITHUB_REF_NAME"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+      - name: Remove signing material
+        if: always()
+        run: rm -f config/velagram-tv.jks config/local.properties
